@@ -34,32 +34,65 @@ jobs:
         run: |
           mkdir -p output
           cd esp-sr/model/wakenet_model
+
+          # Collect all wn9_* models, pick best variant per base wake word
+          # Priority: real speech (no suffix) > _tts3 > _tts2 > _tts
+          declare -A best_model
+
           for model_dir in wn9_*; do
-            if [ -d "$model_dir" ]; then
-              echo "Packing model: $model_dir"
+            [ -d "$model_dir" ] || continue
 
-              # Create a temp directory with just this model
-              tmp_dir=$(mktemp -d)
-              cp -r "$model_dir" "$tmp_dir/"
+            # Strip wn9_ prefix and _tts* suffix to get base name
+            base="${model_dir#wn9_}"
+            base="${base%_tts3}"
+            base="${base%_tts2}"
+            base="${base%_tts}"
 
-              # Pack the single model into srmodels.bin
-              python3 ../../../pack_model.py -m "$tmp_dir" -o srmodels.bin
+            # Determine priority (higher = better)
+            case "$model_dir" in
+              *_tts3) prio=2 ;;
+              *_tts2) prio=3 ;;
+              *_tts)  prio=1 ;;
+              *)      prio=4 ;;  # real speech, best
+            esac
 
-              # Create tarball with license and source info
-              tar_dir="${model_dir}"
-              mkdir -p "../../../output/${tar_dir}"
-              mv "${tmp_dir}/srmodels.bin" "../../../output/${tar_dir}/"
-              cp ../../../LICENSE.esp-sr "../../../output/${tar_dir}/LICENSE"
-              echo "Source: https://github.com/espressif/esp-sr/tree/master/model/wakenet_model/${model_dir}" > "../../../output/${tar_dir}/SOURCE.txt"
-              echo "Built from esp-sr commit: ${{ steps.esp_sr.outputs.hash }}" >> "../../../output/${tar_dir}/SOURCE.txt"
+            current_prio="${best_model[$base]%%:*}"
+            current_prio="${current_prio:-0}"
 
-              cd ../../../output
-              tar czf "${tar_dir}.tar.gz" "${tar_dir}"
-              cd ../esp-sr/model/wakenet_model
-
-              rm -rf "$tmp_dir"
-              echo "Done: ${model_dir}"
+            if [ "$prio" -gt "$current_prio" ]; then
+              best_model[$base]="${prio}:${model_dir}"
             fi
+          done
+
+          # Build only the best variant per wake word
+          for base in "${!best_model[@]}"; do
+            model_dir="${best_model[$base]#*:}"
+            echo "Packing model: $model_dir (as $base)"
+
+            # Create a temp directory with just this model
+            tmp_dir=$(mktemp -d)
+            cp -r "$model_dir" "$tmp_dir/"
+
+            # Pack the single model into srmodels.bin
+            python3 ../../../pack_model.py -m "$tmp_dir" -o srmodels.bin
+
+            # Create tarball with clean name (no wn9_ prefix or _tts* suffix)
+            mkdir -p "../../../output/${base}"
+            mv "${tmp_dir}/srmodels.bin" "../../../output/${base}/"
+            cp ../../../LICENSE.esp-sr "../../../output/${base}/LICENSE"
+            cat > "../../../output/${base}/SOURCE.txt" <<EOF
+          Wake word: ${base}
+          Source model: ${model_dir}
+          Repository: https://github.com/espressif/esp-sr/tree/master/model/wakenet_model/${model_dir}
+          Built from esp-sr commit: ${{ steps.esp_sr.outputs.hash }}
+          EOF
+
+            cd ../../../output
+            tar czf "${base}.tar.gz" "${base}"
+            cd ../esp-sr/model/wakenet_model
+
+            rm -rf "$tmp_dir"
+            echo "Done: ${base} (from ${model_dir})"
           done
 
       - name: List built models
@@ -79,5 +112,8 @@ jobs:
             - `srmodels.bin` — ready to flash via Willow srmodel OTA
             - `LICENSE` — MIT license from Espressif
             - `SOURCE.txt` — provenance information
+
+            Models are named by wake word (e.g. `heywillow`), with the best
+            available training variant selected automatically.
           files: output/*.tar.gz
           make_latest: true
