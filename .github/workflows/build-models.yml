@@ -1,0 +1,83 @@
+name: Build SR Models
+
+on:
+  workflow_dispatch:
+  schedule:
+    # Weekly check for new models (Monday 06:00 UTC)
+    - cron: '0 6 * * 1'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Clone ESP-SR
+        run: |
+          git clone --depth 1 https://github.com/espressif/esp-sr.git
+
+      - name: Get ESP-SR commit hash
+        id: esp_sr
+        run: |
+          cd esp-sr
+          echo "hash=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+          echo "date=$(date -u +%Y%m%d)" >> "$GITHUB_OUTPUT"
+
+      - name: Copy pack_model.py
+        run: cp esp-sr/model/pack_model.py .
+
+      - name: Fetch ESP-SR LICENSE
+        run: cp esp-sr/LICENSE LICENSE.esp-sr
+
+      - name: Build model partition images
+        run: |
+          mkdir -p output
+          cd esp-sr/model/wakenet_model
+          for model_dir in wn9_*; do
+            if [ -d "$model_dir" ]; then
+              echo "Packing model: $model_dir"
+
+              # Create a temp directory with just this model
+              tmp_dir=$(mktemp -d)
+              cp -r "$model_dir" "$tmp_dir/"
+
+              # Pack the single model into srmodels.bin
+              python3 ../../../pack_model.py -m "$tmp_dir" -o srmodels.bin
+
+              # Create tarball with license and source info
+              tar_dir="${model_dir}"
+              mkdir -p "../../../output/${tar_dir}"
+              mv "${tmp_dir}/srmodels.bin" "../../../output/${tar_dir}/"
+              cp ../../../LICENSE.esp-sr "../../../output/${tar_dir}/LICENSE"
+              echo "Source: https://github.com/espressif/esp-sr/tree/master/model/wakenet_model/${model_dir}" > "../../../output/${tar_dir}/SOURCE.txt"
+              echo "Built from esp-sr commit: ${{ steps.esp_sr.outputs.hash }}" >> "../../../output/${tar_dir}/SOURCE.txt"
+
+              cd ../../../output
+              tar czf "${tar_dir}.tar.gz" "${tar_dir}"
+              cd ../esp-sr/model/wakenet_model
+
+              rm -rf "$tmp_dir"
+              echo "Done: ${model_dir}"
+            fi
+          done
+
+      - name: List built models
+        run: ls -lh output/*.tar.gz
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: "v${{ steps.esp_sr.outputs.date }}-${{ steps.esp_sr.outputs.hash }}"
+          name: "SR Models (${{ steps.esp_sr.outputs.date }}, esp-sr@${{ steps.esp_sr.outputs.hash }})"
+          body: |
+            Pre-built WakeNet v9 model partition images for Willow OTA.
+
+            Built from [espressif/esp-sr@${{ steps.esp_sr.outputs.hash }}](https://github.com/espressif/esp-sr/commit/${{ steps.esp_sr.outputs.hash }}).
+
+            Each tarball contains:
+            - `srmodels.bin` — ready to flash via Willow srmodel OTA
+            - `LICENSE` — MIT license from Espressif
+            - `SOURCE.txt` — provenance information
+          files: output/*.tar.gz
+          make_latest: true
