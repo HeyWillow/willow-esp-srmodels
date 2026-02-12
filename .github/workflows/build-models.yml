@@ -42,6 +42,11 @@ jobs:
           for model_dir in wn9_*; do
             [ -d "$model_dir" ] || continue
 
+            # Skip archived/versioned directories (e.g. _tts_v1)
+            case "$model_dir" in
+              *_v[0-9]*) echo "Skipping archived model: $model_dir"; continue ;;
+            esac
+
             # Strip wn9_ prefix and _tts* suffix to get base name
             base="${model_dir#wn9_}"
             base="${base%_tts3}"
